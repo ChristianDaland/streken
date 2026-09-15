@@ -1,31 +1,35 @@
-body {
+html, body {
   margin: 0;
-  display: flex;
-  justify-content: center;
-  align-items: center;
-  height: 100vh;
-  background-color: #111;
+  padding: 0;
+  width: 100vw;
+  height: 100dvh;
+  overflow: hidden;
+  background-color: #0088cc;
   font-family: sans-serif;
   color: #fff;
+  position: fixed; 
 }
 
 .game-container {
   display: flex;
-  flex-direction: column;
+  justify-content: center;
   align-items: center;
-  gap: 15px;
+  width: 100vw;
+  height: 100dvh;
 }
 
 canvas {
-  border: 3px solid #333;
-  /* Bakgrunnsfargen kan endres for klassisk La Linea stemning (f.eks. knall blå eller rød) */
+  display: block;
+  width: 100%;
+  height: 100%;
   background-color: #0088cc;
-  box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+  border: none;
+  box-shadow: none;
   cursor: crosshair;
+  object-fit: contain;
+  touch-action: none; /* Stopper at mobilen flytter vinduet når du berører skjermen */
 }
 
 .instructions {
-  font-size: 14px;
-  letter-spacing: 1px;
-  opacity: 0.8;
+  display: none;
 }

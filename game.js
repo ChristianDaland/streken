@@ -1,25 +1,27 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
-const GROUND_Y = 300;
+let GROUND_Y = 400; 
+let isLandscape = false;
+let isSmallLandscape = false;
 const OBSTACLE_TYPES = ['hole', 'wall', 'spikes', 'canon', 'cloud'];
 
 let gameObjects = {
   player: {
     x: 50,
-    y: GROUND_Y,
+    y: 400,
     speed: 2,
     maxSpeed: 2,
     facingRight: true,
     isFalling: false,
     fallSpeed: 0,
+    fallStartY: 400,
     walkFrame: 0,
     state: 'WALKING_HAPPY',
     hurtTimer: 0
   },
-  currentObstacleIndex: 0,
   obstacles: [],
-  drawnLine: [],
+  drawnLines: [],
   cameraX: 0,
   score: 0,
   manualStopPenaltyApplied: false,
@@ -30,6 +32,35 @@ let gameObjects = {
 let scrollAccumulator = 0;
 let scrollTimeout = null;
 let isDragging = false;
+let currentStroke = null;
+
+// Dynamisk skalering
+function resizeCanvas() {
+  canvas.width = window.innerWidth;
+  canvas.height = window.innerHeight;
+  
+  isLandscape = canvas.width > canvas.height;
+  isSmallLandscape = isLandscape && canvas.height < 500;
+  
+  if (isLandscape) {
+    if (isSmallLandscape) {
+      GROUND_Y = Math.floor(canvas.height * 0.72);
+    } else if (canvas.height < 600) {
+      GROUND_Y = Math.floor(canvas.height * 0.75);
+    } else {
+      GROUND_Y = Math.floor(canvas.height * 0.70);
+    }
+  } else {
+    GROUND_Y = Math.floor(canvas.height * 0.65);
+  }
+  
+  if (!gameObjects.player.isFalling) {
+    gameObjects.player.y = GROUND_Y;
+    gameObjects.player.fallStartY = GROUND_Y;
+  }
+}
+
+window.addEventListener('resize', resizeCanvas);
 
 // 1. GENERER HINDRINGER
 function createObstacle(xPos, type) {
@@ -48,62 +79,95 @@ function createObstacle(xPos, type) {
 
 function initObstacles() {
   gameObjects.obstacles = [];
-  gameObjects.currentObstacleIndex = 0;
   gameObjects.manualStopPenaltyApplied = false;
   gameObjects.wetObstaclesCounter = 0;
-  spawnNextObstacle(350);
+
+  let startX = 400;
+  const spacing = isLandscape && !isSmallLandscape ? 500 : 380;
+
+  for (let i = 0; i < 4; i++) {
+    const randomType = OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
+    gameObjects.obstacles.push(createObstacle(startX, randomType));
+    startX += spacing;
+  }
 }
 
-function spawnNextObstacle(xPos) {
-  const randomType = OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
-  gameObjects.obstacles.push(createObstacle(xPos, randomType));
+function getCurrentObstacle() {
+  return gameObjects.obstacles.find(obs => !obs.passed);
 }
 
-// 2. LINJESJEKK
+// 2. LINJESJEKK & HJELPEFUNKSJONER
 function getDrawnYAt(x) {
-  if (gameObjects.drawnLine.length < 2) return null;
+  if (!gameObjects.drawnLines || gameObjects.drawnLines.length === 0) return null;
 
-  for (let i = 0; i < gameObjects.drawnLine.length - 1; i++) {
-    let p1 = gameObjects.drawnLine[i];
-    let p2 = gameObjects.drawnLine[i + 1];
+  let bestY = null;
 
-    let minX = Math.min(p1.x, p2.x);
-    let maxX = Math.max(p1.x, p2.x);
+  for (let line of gameObjects.drawnLines) {
+    if (line.length < 2) continue;
 
-    if (x >= minX && x <= maxX) {
-      if (maxX === minX) return p1.y;
-      let factor = (x - p1.x) / (p2.x - p1.x);
-      return p1.y + factor * (p2.y - p1.y);
+    for (let i = 0; i < line.length - 1; i++) {
+      let p1 = line[i];
+      let p2 = line[i + 1];
+
+      let minX = Math.min(p1.x, p2.x);
+      let maxX = Math.max(p1.x, p2.x);
+
+      if (x >= minX && x <= maxX) {
+        let y = null;
+        if (maxX === minX) {
+          y = p1.y;
+        } else {
+          let factor = (x - p1.x) / (p2.x - p1.x);
+          y = p1.y + factor * (p2.y - p1.y);
+        }
+        
+        if (bestY === null || y < bestY) {
+          bestY = y;
+        }
+      }
     }
   }
-  return null;
+  return bestY;
 }
 
 function getDrawnLineMaxX() {
-  if (gameObjects.drawnLine.length === 0) return 0;
-  return Math.max(...gameObjects.drawnLine.map(p => p.x));
+  if (!gameObjects.drawnLines || gameObjects.drawnLines.length === 0) return 0;
+  let maxX = 0;
+  for (let line of gameObjects.drawnLines) {
+    if (line.length > 0) {
+      let lineMax = Math.max(...line.map(p => p.x));
+      if (lineMax > maxX) maxX = lineMax;
+    }
+  }
+  return maxX;
 }
 
-function getDrawnLineMinX() {
-  if (gameObjects.drawnLine.length === 0) return Infinity;
-  return Math.min(...gameObjects.drawnLine.map(p => p.x));
-}
-
-// Sjekker om linjen er en gyldig, trygg bro over hinderet
 function isSafeBridgeOverObstacle(obs) {
-  if (gameObjects.drawnLine.length < 2) return false;
+  if (!gameObjects.drawnLines || gameObjects.drawnLines.length === 0) return false;
 
   const obstacleTopY = GROUND_Y - obs.height;
 
-  // Sjekk gjennom hele hinderets bredde
   for (let xCheck = obs.x; xCheck <= obs.x + obs.width; xCheck += 5) {
     let lineY = getDrawnYAt(xCheck);
-    // Hvis det mangler strek over hinderet, eller hvis streken er lavere (høyere Y-verdi) enn toppen av hinderet
-    if (lineY === null || lineY > obstacleTopY) {
-      return false; // Streken er for lav eller mangler her -> ikke en trygg bro!
+    if (lineY === null || lineY > obstacleTopY + 10) {
+      return false; 
     }
   }
-  return true; // Broen dekker hele hinderet og er høyt nok opp!
+  return true; 
+}
+
+function getCloudY() {
+  if (isLandscape) {
+    if (isSmallLandscape) {
+      return Math.max(50, GROUND_Y - 140);
+    } else if (canvas.height < 600) {
+      return Math.max(60, GROUND_Y - 180);
+    } else {
+      return GROUND_Y - 220;
+    }
+  } else {
+    return Math.max(80, GROUND_Y - 210);
+  }
 }
 
 // 3. OPPDATERING
@@ -111,56 +175,77 @@ function update() {
   if (gameObjects.isGameOver) return;
 
   let p = gameObjects.player;
-  let currentObs = gameObjects.obstacles[gameObjects.currentObstacleIndex];
+  let currentObs = getCurrentObstacle();
 
-  // Hvis han har vondt i tåen, la ham hoppe i ro og tel ned timeren
   if (p.state === 'HURT_TOE') {
     p.speed = 0;
     p.walkFrame += 1;
     p.hurtTimer--;
     if (p.hurtTimer <= 0) {
       p.state = 'STOPPED_ANGRY'; 
-      p.x -= 25; // Flytt ham litt bakover slik at han kommer ut av kollisjonssonen
+      p.x -= 25; 
     }
     return;
   }
 
   if (!p.isFalling) {
-    let drawnY = getDrawnYAt(p.x);
     let targetY = GROUND_Y;
+    let drawnY = getDrawnYAt(p.x);
 
-    // Sjekk kollisjon med faste hinder (vegger, kanoner, pigger)
-    if (currentObs && (currentObs.type === 'wall' || currentObs.type === 'canon' || currentObs.type === 'spikes') && !currentObs.passed) {
-      
-      // Når spilleren nærmer seg hinderet
-      if (p.x + 5 >= currentObs.x && p.x < currentObs.x + currentObs.width) {
-        
-        // Hvis det IKKE finnes en trygg bro over hinderet, skal han krasje og få tå-smerte!
-        if (!isSafeBridgeOverObstacle(currentObs)) {
-          if (p.speed > 0) {
-            p.speed = 0;
-            p.state = 'HURT_TOE';
-            p.hurtTimer = 150; // Vis smerte i ca 2.5 sekunder
-            p.x = currentObs.x - 5; // Sett foten fint opp til kanten
-            gameObjects.score = Math.max(0, gameObjects.score - 75);
-            gameObjects.drawnLine = [];
-          }
-          return;
-        }
+    // Sjekk om Streken faktisk skal gå på en tegnet linje:
+    // Han må enten allerede gå på en linje (p.y < GROUND_Y - 5)
+    // ELLER linjen må starte helt nede ved føttene hans (nærheten av p.y)
+    if (drawnY !== null) {
+      let heightDiff = p.y - drawnY;
+      if (p.y < GROUND_Y - 5 || (heightDiff >= -10 && heightDiff <= 25)) {
+        targetY = drawnY;
       }
     }
 
-    if (currentObs && currentObs.type === 'cloud') {
-      targetY = GROUND_Y;
-    } else if (drawnY !== null) {
-      targetY = drawnY;
+    // Kollisjonslogikk for fysiske hindre
+    if (currentObs && !currentObs.passed) {
+      if (currentObs.type === 'wall' || currentObs.type === 'canon' || currentObs.type === 'spikes') {
+        if (p.x + 5 >= currentObs.x && p.x < currentObs.x + currentObs.width) {
+          if (!isSafeBridgeOverObstacle(currentObs)) {
+            if (p.speed > 0) {
+              p.speed = 0;
+              p.state = 'HURT_TOE';
+              p.hurtTimer = 150;
+              p.x = currentObs.x - 5;
+              gameObjects.score = Math.max(0, gameObjects.score - 75);
+            }
+            return;
+          }
+        }
+      } else if (currentObs.type === 'hole' && p.x >= currentObs.x && p.x <= currentObs.x + currentObs.width) {
+        if (drawnY === null) {
+          p.isFalling = true;
+          p.fallStartY = GROUND_Y;
+          p.fallSpeed = 0;
+          p.speed = 0;
+        }
+      }
+      // Skyen påvirker aldri bakkenivået
     }
 
+    // Sjekk om han går av en tegnet linje ut i luften
+    if (p.y < GROUND_Y && drawnY === null) {
+      let isOverHole = (currentObs && currentObs.type === 'hole' && p.x >= currentObs.x && p.x <= currentObs.x + currentObs.width);
+      if (!isOverHole) {
+        p.isFalling = true;
+        p.fallStartY = p.y;
+        p.fallSpeed = 0;
+        p.speed = 0;
+      }
+    }
+
+    // Sjekk om spilleren har tegnet tak/paraply OVER skyen
     let hasRoofAbove = false;
+    const cloudY = getCloudY();
     if (currentObs && currentObs.type === 'cloud') {
-      for (let xCheck = currentObs.x - 20; xCheck <= currentObs.x + currentObs.width; xCheck += 10) {
+      for (let xCheck = currentObs.x - 20; xCheck <= currentObs.x + currentObs.width + 20; xCheck += 10) {
         let lineY = getDrawnYAt(xCheck);
-        if (lineY !== null && lineY < GROUND_Y - 50 && lineY > GROUND_Y - 220) {
+        if (lineY !== null && lineY < cloudY) {
           hasRoofAbove = true;
           break;
         }
@@ -173,13 +258,9 @@ function update() {
       p.state = 'WALKING_HAPPY';
     }
 
+    // Våt-status hvis han er under sky uten tak over
     if (currentObs && !currentObs.passed) {
-      if (currentObs.type === 'hole' && p.x > currentObs.x + 10 && p.x < currentObs.x + currentObs.width - 10) {
-        if (drawnY === null) {
-          p.isFalling = true;
-          p.speed = 0;
-        }
-      } else if (currentObs.type === 'cloud' && p.x >= currentObs.x && p.x <= currentObs.x + currentObs.width) {
+      if (currentObs.type === 'cloud' && p.x >= currentObs.x && p.x <= currentObs.x + currentObs.width) {
         if (!hasRoofAbove && gameObjects.wetObstaclesCounter === 0) {
           gameObjects.wetObstaclesCounter = 5; 
         }
@@ -194,29 +275,56 @@ function update() {
     }
     p.y = targetY;
 
-    if (currentObs) {
-      const obsEndX = currentObs.x + currentObs.width;
-      const lineEndX = getDrawnLineMaxX();
-      const endThreshold = Math.max(obsEndX, lineEndX) + 20;
+    // Sjekk om hinder er passert
+    gameObjects.obstacles.forEach(obs => {
+      if (!obs.passed) {
+        const obsEndX = obs.x + obs.width;
+        const lineEndX = getDrawnLineMaxX();
+        const endThreshold = Math.max(obsEndX, lineEndX) + 20;
 
-      if (p.x > endThreshold && !currentObs.passed) {
-        currentObs.passed = true;
-        let earnedPoints = 100;
-        if (gameObjects.manualStopPenaltyApplied) earnedPoints = 10;
-        if (gameObjects.wetObstaclesCounter > 0) {
-          earnedPoints = Math.floor(earnedPoints / 2);
-          gameObjects.wetObstaclesCounter--;
+        if (p.x > endThreshold) {
+          obs.passed = true;
+          let earnedPoints = 100;
+          if (gameObjects.manualStopPenaltyApplied) earnedPoints = 10;
+          if (gameObjects.wetObstaclesCounter > 0) {
+            earnedPoints = Math.floor(earnedPoints / 2);
+            gameObjects.wetObstaclesCounter--;
+          }
+          gameObjects.score += earnedPoints;
+          gameObjects.manualStopPenaltyApplied = false;
+
+          const lastObs = gameObjects.obstacles[gameObjects.obstacles.length - 1];
+          const spacing = isLandscape && !isSmallLandscape ? 500 : 380;
+          const randomType = OBSTACLE_TYPES[Math.floor(Math.random() * OBSTACLE_TYPES.length)];
+          gameObjects.obstacles.push(createObstacle(lastObs.x + spacing, randomType));
         }
-        gameObjects.score += earnedPoints;
-        gameObjects.currentObstacleIndex++;
-        gameObjects.manualStopPenaltyApplied = false;
-        spawnNextObstacle(p.x + 300);
-        gameObjects.drawnLine = [];
       }
-    }
+    });
+
   } else {
     p.fallSpeed += 0.4;
     p.y += p.fallSpeed;
+
+    let isOverHoleWithoutBridge = (currentObs && currentObs.type === 'hole' && p.x >= currentObs.x && p.x <= currentObs.x + currentObs.width && getDrawnYAt(p.x) === null);
+
+    if (!isOverHoleWithoutBridge && p.y >= GROUND_Y) {
+      let fallHeight = GROUND_Y - p.fallStartY;
+      p.y = GROUND_Y;
+      p.isFalling = false;
+      p.fallSpeed = 0;
+
+      if (fallHeight > 130) {
+        gameObjects.isGameOver = true;
+      } else if (fallHeight > 45) {
+        p.state = 'HURT_TOE';
+        p.hurtTimer = 120;
+        gameObjects.score = Math.max(0, gameObjects.score - 50);
+      } else {
+        p.state = 'WALKING_HAPPY';
+        p.speed = p.maxSpeed;
+      }
+    }
+
     if (p.y > canvas.height + 50) {
       gameObjects.isGameOver = true;
     }
@@ -232,10 +340,11 @@ function resetGame() {
   gameObjects.player.facingRight = true;
   gameObjects.player.isFalling = false;
   gameObjects.player.fallSpeed = 0;
+  gameObjects.player.fallStartY = GROUND_Y;
   gameObjects.player.walkFrame = 0;
   gameObjects.player.state = 'WALKING_HAPPY';
   gameObjects.player.hurtTimer = 0;
-  gameObjects.drawnLine = [];
+  gameObjects.drawnLines = [];
   gameObjects.cameraX = 0;
   gameObjects.score = 0;
   gameObjects.manualStopPenaltyApplied = false;
@@ -244,90 +353,90 @@ function resetGame() {
   initObstacles();
 }
 
-// 4. TEGNING AV SCENE OG DYNAMISK TEKST
+// 4. TEGNING AV SCENE OG ALLE STREKER
 function drawScene() {
   ctx.strokeStyle = '#ffffff';
   ctx.lineWidth = 5;
   ctx.lineCap = 'round';
   ctx.lineJoin = 'round';
 
-  let currentObs = gameObjects.obstacles[gameObjects.currentObstacleIndex];
-
-  // Hovedbakken
   ctx.beginPath();
   ctx.moveTo(-gameObjects.cameraX, GROUND_Y);
 
-  if (currentObs) {
-    const screenX = currentObs.x - gameObjects.cameraX;
+  gameObjects.obstacles.forEach(obs => {
+    const screenX = obs.x - gameObjects.cameraX;
 
-    if (currentObs.type === 'hole') {
+    if (obs.type === 'hole') {
       ctx.lineTo(screenX, GROUND_Y);
       ctx.lineTo(screenX, canvas.height);
-      ctx.moveTo(screenX + currentObs.width, canvas.height);
-      ctx.lineTo(screenX + currentObs.width, GROUND_Y);
-    } else if (currentObs.type === 'wall') {
+      ctx.moveTo(screenX + obs.width, canvas.height);
+      ctx.lineTo(screenX + obs.width, GROUND_Y);
+    } else if (obs.type === 'wall') {
       ctx.lineTo(screenX, GROUND_Y);
-      ctx.lineTo(screenX, GROUND_Y - currentObs.height);
-      ctx.lineTo(screenX + currentObs.width, GROUND_Y - currentObs.height);
-      ctx.lineTo(screenX + currentObs.width, GROUND_Y);
-    } else if (currentObs.type === 'spikes') {
+      ctx.lineTo(screenX, GROUND_Y - obs.height);
+      ctx.lineTo(screenX + obs.width, GROUND_Y - obs.height);
+      ctx.lineTo(screenX + obs.width, GROUND_Y);
+    } else if (obs.type === 'spikes') {
       ctx.lineTo(screenX, GROUND_Y);
-      const spikeWidth = currentObs.width / currentObs.count;
-      for (let i = 0; i < currentObs.count; i++) {
-        ctx.lineTo(screenX + i * spikeWidth + spikeWidth / 2, GROUND_Y - currentObs.height);
+      const spikeWidth = obs.width / obs.count;
+      for (let i = 0; i < obs.count; i++) {
+        ctx.lineTo(screenX + i * spikeWidth + spikeWidth / 2, GROUND_Y - obs.height);
         ctx.lineTo(screenX + (i + 1) * spikeWidth, GROUND_Y);
       }
-    } else if (currentObs.type === 'canon') {
+    } else if (obs.type === 'canon') {
       ctx.lineTo(screenX, GROUND_Y);
-      ctx.lineTo(screenX, GROUND_Y - currentObs.height);
-      ctx.lineTo(screenX + currentObs.width, GROUND_Y - currentObs.height + 10);
-      ctx.lineTo(screenX + currentObs.width, GROUND_Y);
-    } else if (currentObs.type === 'cloud') {
-      ctx.lineTo(screenX + currentObs.width, GROUND_Y);
+      ctx.lineTo(screenX, GROUND_Y - obs.height);
+      ctx.lineTo(screenX + obs.width, GROUND_Y - obs.height + 10);
+      ctx.lineTo(screenX + obs.width, GROUND_Y);
+    } else if (obs.type === 'cloud') {
+      ctx.lineTo(screenX + obs.width, GROUND_Y);
     }
-  }
+  });
 
-  ctx.lineTo(canvas.width + gameObjects.cameraX, GROUND_Y);
+  ctx.lineTo(canvas.width + gameObjects.cameraX * 2, GROUND_Y);
   ctx.stroke();
 
-  // Regnsky
-  if (currentObs && currentObs.type === 'cloud') {
-    const screenX = currentObs.x - gameObjects.cameraX;
-    const cloudY = GROUND_Y - 240;
+  gameObjects.obstacles.forEach(obs => {
+    if (obs.type === 'cloud') {
+      const screenX = obs.x - gameObjects.cameraX;
+      const cloudY = getCloudY();
 
-    ctx.beginPath();
-    ctx.arc(screenX + 35, cloudY, 22, Math.PI, 0, false);
-    ctx.arc(screenX + 70, cloudY - 12, 28, Math.PI, 0, false);
-    ctx.arc(screenX + 105, cloudY, 22, Math.PI, 0, false);
-    ctx.lineTo(screenX + 15, cloudY + 10);
-    ctx.closePath();
-    ctx.stroke();
-
-    ctx.save();
-    ctx.lineWidth = 2;
-    const dropOffset = (Date.now() / 10) % 25;
-    for (let i = 0; i < 5; i++) {
-      let dropX = screenX + 25 + i * 20;
-      let dropY = cloudY + 20 + dropOffset;
       ctx.beginPath();
-      ctx.moveTo(dropX, dropY);
-      ctx.lineTo(dropX - 5, dropY + 12);
+      ctx.arc(screenX + 35, cloudY, 22, Math.PI, 0, false);
+      ctx.arc(screenX + 70, cloudY - 12, 28, Math.PI, 0, false);
+      ctx.arc(screenX + 105, cloudY, 22, Math.PI, 0, false);
+      ctx.lineTo(screenX + 15, cloudY + 10);
+      ctx.closePath();
       ctx.stroke();
-    }
-    ctx.restore();
-  }
 
-  // Tegnet linje
-  if (gameObjects.drawnLine.length > 1) {
+      ctx.save();
+      ctx.lineWidth = 2;
+      const dropOffset = (Date.now() / 10) % 25;
+      for (let i = 0; i < 5; i++) {
+        let dropX = screenX + 25 + i * 20;
+        let dropY = cloudY + 20 + dropOffset;
+        ctx.beginPath();
+        ctx.moveTo(dropX, dropY);
+        ctx.lineTo(dropX - 5, dropY + 12);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+  });
+
+  if (gameObjects.drawnLines && gameObjects.drawnLines.length > 0) {
     ctx.beginPath();
-    ctx.moveTo(gameObjects.drawnLine[0].x - gameObjects.cameraX, gameObjects.drawnLine[0].y);
-    for (let i = 1; i < gameObjects.drawnLine.length; i++) {
-      ctx.lineTo(gameObjects.drawnLine[i].x - gameObjects.cameraX, gameObjects.drawnLine[i].y);
+    for (let line of gameObjects.drawnLines) {
+      if (line.length > 1) {
+        ctx.moveTo(line[0].x - gameObjects.cameraX, line[0].y);
+        for (let i = 1; i < line.length; i++) {
+          ctx.lineTo(line[i].x - gameObjects.cameraX, line[i].y);
+        }
+      }
     }
     ctx.stroke();
   }
 
-  // UI / Poeng og dynamisk hjelpetekst
   ctx.save();
   ctx.font = '20px sans-serif';
   ctx.fillStyle = '#ffffff';
@@ -338,22 +447,23 @@ function drawScene() {
     ctx.fillText('Våt! (Redusert poeng i ' + gameObjects.wetObstaclesCounter + ' hinder til)', 30, 70);
   }
 
-  // Dynamisk veiledning i bunnen av canvas
-  ctx.font = '15px sans-serif';
-  ctx.fillStyle = '#cccccc';
-  ctx.textAlign = 'center';
-  let hintText = 'Bruk musehjulet til å rulle frem og tilbake';
-  
-  if (currentObs) {
-    if (currentObs.type === 'hole') hintText = 'Tegn en bro over hele hullet!';
-    else if (currentObs.type === 'wall' || currentObs.type === 'canon') hintText = 'Tegn over hele hinderet, eller rull bakover for å snu!';
-    else if (currentObs.type === 'spikes') hintText = 'Tegn høyt nok over piggene for å unngå å slå deg!';
-    else if (currentObs.type === 'cloud') hintText = 'Tegn et tak over skyen for å unngå å bli våt!';
+  if (!isSmallLandscape) {
+    ctx.font = '15px sans-serif';
+    ctx.fillStyle = '#cccccc';
+    ctx.textAlign = 'center';
+    let currentObs = getCurrentObstacle();
+    let hintText = 'Bruk musehjulet (eller trykk bak/på Streken) for bevegelse';
+    
+    if (currentObs) {
+      if (currentObs.type === 'hole') hintText = 'Tegn en bro over hele hullet foran Streken!';
+      else if (currentObs.type === 'wall' || currentObs.type === 'canon') hintText = 'Tegn over hinderet, eller trykk på Streken for å snu!';
+      else if (currentObs.type === 'spikes') hintText = 'Tegn høyt nok over piggene!';
+      else if (currentObs.type === 'cloud') hintText = 'Tegn et tak over skyen som en paraply for å ikke bli våt!';
+    }
+    ctx.fillText(hintText, canvas.width / 2, canvas.height - 20);
   }
-  ctx.fillText(hintText, canvas.width / 2, canvas.height - 20);
   ctx.restore();
 
-  // Game Over
   if (gameObjects.isGameOver) {
     ctx.save();
     ctx.fillStyle = 'rgba(0, 0, 0, 0.75)';
@@ -362,17 +472,17 @@ function drawScene() {
     ctx.font = 'bold 36px sans-serif';
     ctx.fillStyle = '#ff4444';
     ctx.textAlign = 'center';
-    ctx.fillText('STREKEN FALDT NED / DØDE!', canvas.width / 2, canvas.height / 2 - 20);
+    ctx.fillText('STREKEN FALT NED / DØDE!', canvas.width / 2, canvas.height / 2 - 20);
 
     ctx.font = '20px sans-serif';
     ctx.fillStyle = '#ffffff';
     ctx.fillText('Sluttscore: ' + gameObjects.score, canvas.width / 2, canvas.height / 2 + 20);
-    ctx.fillText('Klikk med musen for å prøve igjen', canvas.width / 2, canvas.height / 2 + 65);
+    ctx.fillText('Trykk eller klikk for å prøve igjen', canvas.width / 2, canvas.height / 2 + 65);
     ctx.restore();
   }
 }
 
-// 5. HELPER FOR FINGERER
+// 5. HELPER FOR HENDER
 function drawHand(ctx, startX, startY, angle, scale = 1) {
   ctx.save();
   ctx.translate(startX, startY);
@@ -487,7 +597,93 @@ function drawStrekenCharacter(x, y, frame, facingRight, state) {
   ctx.restore();
 }
 
-// 7. EVENT LISTENERS
+// 7. INPUT-LOGIKK MED INTERPOLERING
+function getCanvasCoordinates(clientX, clientY) {
+  const rect = canvas.getBoundingClientRect();
+  const vx = window.visualViewport ? window.visualViewport.offsetLeft : 0;
+  const vy = window.visualViewport ? window.visualViewport.offsetTop : 0;
+  const scaleX = canvas.width / rect.width;
+  const scaleY = canvas.height / rect.height;
+
+  return {
+    x: (clientX - rect.left - vx) * scaleX,
+    y: (clientY - rect.top - vy) * scaleY
+  };
+}
+
+function handleInputStart(screenX, screenY) {
+  if (gameObjects.isGameOver) {
+    resetGame();
+    return;
+  }
+
+  let p = gameObjects.player;
+  let playerScreenX = p.x - gameObjects.cameraX;
+
+  if (screenX <= playerScreenX + 25) {
+    if (p.state === 'HURT_TOE') return;
+
+    if (p.speed !== 0) {
+      p.speed = 0;
+      scrollAccumulator = 0;
+    } else {
+      if (p.facingRight) {
+        p.speed = -p.maxSpeed;
+        p.facingRight = false;
+      } else {
+        p.speed = p.maxSpeed;
+        p.facingRight = true;
+      }
+      p.state = 'WALKING_HAPPY';
+      
+      if (!gameObjects.manualStopPenaltyApplied) {
+        gameObjects.score = Math.max(0, gameObjects.score - 20);
+        gameObjects.manualStopPenaltyApplied = true;
+      }
+    }
+  } else {
+    isDragging = true;
+    currentStroke = [{
+      x: screenX + gameObjects.cameraX,
+      y: screenY
+    }];
+    gameObjects.drawnLines.push(currentStroke);
+  }
+}
+
+function handleInputMove(screenX, screenY) {
+  if (!isDragging || !currentStroke || gameObjects.isGameOver) return;
+
+  const newX = screenX + gameObjects.cameraX;
+  const newY = screenY;
+
+  const lastPoint = currentStroke[currentStroke.length - 1];
+  const dx = newX - lastPoint.x;
+  const dy = newY - lastPoint.y;
+  const distance = Math.sqrt(dx * dx + dy * dy);
+
+  if (distance > 5) {
+    const steps = Math.ceil(distance / 5);
+    for (let i = 1; i <= steps; i++) {
+      const t = i / steps;
+      currentStroke.push({
+        x: lastPoint.x + dx * t,
+        y: lastPoint.y + dy * t
+      });
+    }
+  } else {
+    currentStroke.push({
+      x: newX,
+      y: newY
+    });
+  }
+}
+
+function handleInputEnd() {
+  isDragging = false;
+  currentStroke = null;
+}
+
 canvas.addEventListener('wheel', (e) => {
   e.preventDefault();
   if (gameObjects.isGameOver) return;
@@ -497,7 +693,6 @@ canvas.addEventListener('wheel', (e) => {
 
   const direction = e.deltaY < 0 ? 1 : -1;
 
-  // Hvis han er stoppet (enten etter stopp eller ferdig med tå-skade), tillat å rulle bakover
   if (p.state === 'STOPPED_ANGRY' && direction < 0) {
     p.speed = -p.maxSpeed;
     p.facingRight = false;
@@ -511,7 +706,6 @@ canvas.addEventListener('wheel', (e) => {
     return;
   }
 
-  // Ignorer musehjul mens tå-skaden pågår aktivt
   if (p.state === 'HURT_TOE') return;
 
   if (p.speed !== 0 && ((p.speed > 0 && direction < 0) || (p.speed < 0 && direction > 0))) {
@@ -539,31 +733,36 @@ canvas.addEventListener('wheel', (e) => {
 }, { passive: false });
 
 canvas.addEventListener('mousedown', (e) => {
-  if (gameObjects.isGameOver) {
-    resetGame();
-    return;
-  }
-
-  const rect = canvas.getBoundingClientRect();
-  isDragging = true;
-  gameObjects.drawnLine = [{
-    x: e.clientX - rect.left + gameObjects.cameraX,
-    y: e.clientY - rect.top
-  }];
+  const coords = getCanvasCoordinates(e.clientX, e.clientY);
+  handleInputStart(coords.x, coords.y);
 });
 
 canvas.addEventListener('mousemove', (e) => {
-  if (!isDragging || gameObjects.isGameOver) return;
-  const rect = canvas.getBoundingClientRect();
-  gameObjects.drawnLine.push({
-    x: e.clientX - rect.left + gameObjects.cameraX,
-    y: e.clientY - rect.top
-  });
+  const coords = getCanvasCoordinates(e.clientX, e.clientY);
+  handleInputMove(coords.x, coords.y);
 });
 
-window.addEventListener('mouseup', () => {
-  isDragging = false;
-});
+window.addEventListener('mouseup', handleInputEnd);
+
+canvas.addEventListener('touchstart', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) {
+    const touch = e.touches[0];
+    const coords = getCanvasCoordinates(touch.clientX, touch.clientY);
+    handleInputStart(coords.x, coords.y);
+  }
+}, { passive: false });
+
+canvas.addEventListener('touchmove', (e) => {
+  e.preventDefault();
+  if (e.touches.length > 0) {
+    const touch = e.touches[0];
+    const coords = getCanvasCoordinates(touch.clientX, touch.clientY);
+    handleInputMove(coords.x, coords.y);
+  }
+}, { passive: false });
+
+window.addEventListener('touchend', handleInputEnd);
 
 // 8. MAIN LOOP
 function gameLoop() {
@@ -582,5 +781,8 @@ function gameLoop() {
   requestAnimationFrame(gameLoop);
 }
 
+resizeCanvas();
+gameObjects.player.y = GROUND_Y;
+gameObjects.player.fallStartY = GROUND_Y;
 initObstacles();
 gameLoop();
