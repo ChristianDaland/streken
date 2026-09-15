@@ -1,0 +1,31 @@
+body {
+  margin: 0;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  height: 100vh;
+  background-color: #111;
+  font-family: sans-serif;
+  color: #fff;
+}
+
+.game-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 15px;
+}
+
+canvas {
+  border: 3px solid #333;
+  /* Bakgrunnsfargen kan endres for klassisk La Linea stemning (f.eks. knall blå eller rød) */
+  background-color: #0088cc;
+  box-shadow: 0 10px 30px rgba(0,0,0,0.7);
+  cursor: crosshair;
+}
+
+.instructions {
+  font-size: 14px;
+  letter-spacing: 1px;
+  opacity: 0.8;
+}
